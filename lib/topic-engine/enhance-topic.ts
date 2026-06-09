@@ -162,6 +162,198 @@ function isValidFullAnalysis(value: unknown): value is TopicAnalysisLLMResult {
   );
 }
 
+function normalizeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function normalizeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function splitListString(value: string): string[] {
+  return value
+    .split(/[\r\n,，、/|；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeStringArrayValue(
+  value: unknown,
+  fallback: string[],
+  options?: { maxItems?: number },
+): string[] {
+  const maxItems = options?.maxItems;
+
+  let normalized: string[] = [];
+
+  if (Array.isArray(value)) {
+    normalized = value
+      .map((item) => normalizeString(item))
+      .filter((item): item is string => item !== null);
+  } else if (typeof value === "string") {
+    normalized = splitListString(value);
+  }
+
+  if (normalized.length === 0) {
+    normalized = fallback;
+  }
+
+  return typeof maxItems === "number" ? normalized.slice(0, maxItems) : normalized;
+}
+
+function normalizeDimensionScoresValue(
+  value: unknown,
+  fallback: TopicAnalysisLLMResult["dimensionScores"],
+): TopicAnalysisLLMResult["dimensionScores"] {
+  if (!Array.isArray(value)) {
+    return fallback;
+  }
+
+  const normalized = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+
+      const name = normalizeString((item as { name?: unknown }).name);
+      const score = normalizeNumber((item as { score?: unknown }).score);
+      const reason = normalizeString((item as { reason?: unknown }).reason);
+
+      if (!name || score === null || !reason) {
+        return null;
+      }
+
+      return { name, score, reason };
+    })
+    .filter(
+      (
+        item,
+      ): item is TopicAnalysisLLMResult["dimensionScores"][number] => item !== null,
+    );
+
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function normalizeDiagnosisValue(
+  value: unknown,
+  fallback: TopicAnalysisLLMResult["diagnosis"],
+  topLevelRiskKeywords: string[],
+  topLevelCollisionAngles: string[],
+  topLevelWhyLooksGeneric: string,
+): TopicAnalysisLLMResult["diagnosis"] {
+  const candidate = value && typeof value === "object" ? value : null;
+
+  const riskKeywords = normalizeStringArrayValue(
+    candidate ? (candidate as { riskKeywords?: unknown }).riskKeywords : undefined,
+    topLevelRiskKeywords.length > 0 ? topLevelRiskKeywords : fallback.riskKeywords,
+  );
+
+  const collisionAngles = normalizeStringArrayValue(
+    candidate ? (candidate as { collisionAngles?: unknown }).collisionAngles : undefined,
+    topLevelCollisionAngles.length > 0 ? topLevelCollisionAngles : fallback.collisionAngles,
+  );
+
+  const whyLooksGeneric =
+    normalizeString(
+      candidate ? (candidate as { whyLooksGeneric?: unknown }).whyLooksGeneric : undefined,
+    ) ??
+    normalizeString(topLevelWhyLooksGeneric) ??
+    fallback.whyLooksGeneric;
+
+  return {
+    riskKeywords,
+    collisionAngles,
+    whyLooksGeneric,
+  };
+}
+
+function normalizeFullAnalysis(
+  value: unknown,
+  fallback: TopicAnalysisLLMResult,
+): TopicAnalysisLLMResult | null {
+  if (!value || typeof value !== "object") return null;
+
+  const candidate = value as Partial<Record<keyof TopicAnalysisLLMResult, unknown>>;
+  const score = normalizeNumber(candidate.score) ?? fallback.score;
+
+  const statusCandidate = normalizeString(candidate.status);
+  const status =
+    statusCandidate && VALID_STATUSES.includes(statusCandidate as TopicStatus)
+      ? (statusCandidate as TopicStatus)
+      : fallback.status;
+
+  const summary = normalizeString(candidate.summary) ?? fallback.summary;
+  const audience = normalizeString(candidate.audience) ?? fallback.audience;
+  const painPoint = normalizeString(candidate.painPoint) ?? fallback.painPoint;
+  const angle = normalizeString(candidate.angle) ?? fallback.angle;
+  const homogeneityRisk =
+    normalizeString(candidate.homogeneityRisk) ?? fallback.homogeneityRisk;
+
+  const riskKeywords = normalizeStringArrayValue(
+    candidate.riskKeywords,
+    fallback.riskKeywords,
+  );
+  const collisionAngles = normalizeStringArrayValue(
+    candidate.collisionAngles,
+    fallback.collisionAngles,
+  );
+  const recommendedAngle =
+    normalizeString(candidate.recommendedAngle) ?? fallback.recommendedAngle;
+  const alternativeAngles = normalizeStringArrayValue(
+    candidate.alternativeAngles,
+    fallback.alternativeAngles,
+    { maxItems: 2 },
+  );
+  const dimensionScores = normalizeDimensionScoresValue(
+    candidate.dimensionScores,
+    fallback.dimensionScores,
+  );
+  const publishChecklist = normalizeStringArrayValue(
+    candidate.publishChecklist,
+    fallback.publishChecklist,
+  );
+  const seriesBreakdown = normalizeStringArrayValue(
+    candidate.seriesBreakdown,
+    fallback.seriesBreakdown,
+  );
+  const diagnosis = normalizeDiagnosisValue(
+    candidate.diagnosis,
+    fallback.diagnosis,
+    riskKeywords,
+    collisionAngles,
+    homogeneityRisk,
+  );
+
+  const normalized: TopicAnalysisLLMResult = {
+    score,
+    status,
+    summary,
+    audience,
+    painPoint,
+    angle,
+    homogeneityRisk,
+    riskKeywords,
+    collisionAngles,
+    recommendedAngle,
+    alternativeAngles,
+    dimensionScores,
+    diagnosis,
+    publishChecklist,
+    seriesBreakdown,
+  };
+
+  return isValidFullAnalysis(normalized) ? normalized : null;
+}
+
 function buildPrompt({ rawIdea, profile }: TopicEnhancementRequest) {
   return [
     "你是一个小红书内容选题顾问。",
@@ -208,7 +400,11 @@ function getProvider(): LLMProvider {
   return "deepseek";
 }
 
-function parseAnalysisText(outputText: string, providerLabel: string): TopicAnalysisLLMResult {
+function parseAnalysisText(
+  outputText: string,
+  providerLabel: string,
+  fallbackAnalysis?: TopicAnalysisLLMResult,
+): TopicAnalysisLLMResult {
   const normalizedText = outputText
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -229,11 +425,18 @@ function parseAnalysisText(outputText: string, providerLabel: string): TopicAnal
     parsed = JSON.parse(normalizedText.slice(jsonStart, jsonEnd + 1)) as unknown;
   }
 
-  if (!isValidFullAnalysis(parsed)) {
-    throw new Error(`${providerLabel} response shape is invalid`);
+  if (isValidFullAnalysis(parsed)) {
+    return parsed;
   }
 
-  return parsed;
+  if (fallbackAnalysis) {
+    const normalized = normalizeFullAnalysis(parsed, fallbackAnalysis);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  throw new Error(`${providerLabel} response shape is invalid`);
 }
 
 async function callOpenAIProvider(
@@ -325,7 +528,7 @@ async function callDeepSeekProvider(
     throw new Error("DeepSeek response did not include message content");
   }
 
-  return parseAnalysisText(outputText, "DeepSeek");
+  return parseAnalysisText(outputText, "DeepSeek", payload.baseAnalysis);
 }
 
 export async function enhanceTopic(
