@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { analyzeTopicWithEnhancement } from "@/lib/topic-engine/analyze-topic-with-enhancement";
+import { analyzeTopic } from "@/lib/topic-engine/analyze-topic";
 import { enhanceTopic } from "@/lib/topic-engine/enhance-topic";
 import { defaultProfile } from "@/lib/topic-engine/profile";
 import type { TopicAnalysisResult, TopicEnhancementRequest } from "@/lib/topic-engine/types";
@@ -7,9 +8,13 @@ import type { TopicAnalysisResult, TopicEnhancementRequest } from "@/lib/topic-e
 const originalEnv = { ...process.env };
 
 function createBaseAnalysis(): TopicAnalysisResult {
+  const base = analyzeTopic("base idea", defaultProfile);
+  if (!base) {
+    throw new Error("expected local analysis result");
+  }
+
   return {
-    score: 80,
-    status: "建议优化",
+    ...base,
     summary: "base summary",
     audience: "base audience",
     painPoint: "base pain point",
@@ -21,7 +26,7 @@ function createBaseAnalysis(): TopicAnalysisResult {
     alternativeAngles: ["base alt"],
     dimensionScores: [
       {
-        name: "人群清晰度",
+        name: "base dimension",
         score: 70,
         reason: "base dimension reason",
       },
@@ -47,8 +52,8 @@ function createRequest(overrides?: Partial<TopicEnhancementRequest>): TopicEnhan
 
 function createLLMResult(overrides?: Partial<TopicAnalysisResult>): TopicAnalysisResult {
   return {
+    ...createBaseAnalysis(),
     score: 91,
-    status: "推荐发布",
     summary: "llm summary",
     audience: "llm audience",
     painPoint: "llm pain point",
@@ -60,7 +65,7 @@ function createLLMResult(overrides?: Partial<TopicAnalysisResult>): TopicAnalysi
     alternativeAngles: ["llm alt 1", "llm alt 2"],
     dimensionScores: [
       {
-        name: "人群清晰度",
+        name: "llm dimension",
         score: 88,
         reason: "llm dimension reason",
       },
@@ -179,6 +184,69 @@ describe("topic enhancement providers", () => {
     expect(result.recommendedAngle).toBe("wrapped recommendation");
     expect(result.alternativeAngles).toEqual(["angle a"]);
     expect(result.publishChecklist).toEqual(["llm checklist"]);
+  });
+
+  it("normalizes recoverable DeepSeek fields and fills missing analysis fields from the base analysis", async () => {
+    process.env = {
+      ...originalEnv,
+      DEEPSEEK_API_KEY: "deepseek-key",
+    };
+
+    const normalizedStatus = createLLMResult().status;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                score: "89",
+                status: normalizedStatus,
+                summary: "normalized summary",
+                audience: "normalized audience",
+                painPoint: "normalized pain point",
+                angle: "normalized angle",
+                homogeneityRisk: "normalized risk",
+                riskKeywords: "keyword a / keyword b",
+                collisionAngles: ["collision a", "collision b"],
+                recommendedAngle: "normalized recommendation",
+                alternativeAngles: "alt a / alt b / alt c",
+                dimensionScores: [
+                  {
+                    name: "normalized dimension",
+                    score: "77",
+                    reason: "normalized reason",
+                  },
+                ],
+                publishChecklist: "check a / check b",
+                seriesBreakdown: "series a\nseries b",
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const result = await enhanceTopic(createRequest(), fetchMock as unknown as typeof fetch);
+
+    expect(result.score).toBe(89);
+    expect(result.status).toBe(normalizedStatus);
+    expect(result.riskKeywords).toEqual(["keyword a", "keyword b"]);
+    expect(result.alternativeAngles).toEqual(["alt a", "alt b"]);
+    expect(result.dimensionScores).toEqual([
+      {
+        name: "normalized dimension",
+        score: 77,
+        reason: "normalized reason",
+      },
+    ]);
+    expect(result.diagnosis).toEqual({
+      riskKeywords: ["keyword a", "keyword b"],
+      collisionAngles: ["collision a", "collision b"],
+      whyLooksGeneric: "normalized risk",
+    });
+    expect(result.publishChecklist).toEqual(["check a", "check b"]);
+    expect(result.seriesBreakdown).toEqual(["series a", "series b"]);
   });
 
   it("uses the OpenAI provider when explicitly configured", async () => {
